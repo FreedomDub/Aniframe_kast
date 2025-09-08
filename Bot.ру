@@ -1,0 +1,224 @@
+import logging
+import os
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, ConversationHandler, filters
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Состояния разговора
+AGE, ROLE, WORK_SAMPLES, TG_LINK = range(4)
+
+# Клавиатура для выбора роли
+role_keyboard = [
+    ['Перевод япон', 'Перевод англ'],
+    ['Монтажер', 'Звукомонтажер'],
+    ['Актёр озвучки', 'Актриса озвучки']
+]
+reply_markup = ReplyKeyboardMarkup(role_keyboard, one_time_keyboard=True, resize_keyboard=True)
+
+# Конфигурация (будет переопределена через environment variables)
+BOT_TOKEN = os.getenv('BOT_TOKEN', 'ВАШ_ТОКЕН_БОТА')
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID', 'ВАШ_TELEGRAM_ID')
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает разговор и спрашивает возраст."""
+    await update.message.reply_text(
+        "Добро пожаловать в кастинг-студию Aniframe! 🎙️\n\n"
+        "Ответьте на несколько вопросов для участия в кастинге.\n\n"
+        "Сколько вам лет?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return AGE
+
+async def age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет возраст и спрашивает о роли."""
+    context.user_data['age'] = update.message.text
+    await update.message.reply_text(
+        "Кем вы хотите быть в нашей студии?",
+        reply_markup=reply_markup
+    )
+    return ROLE
+
+async def role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет роль и запрашивает работы или переходит к следующему шагу."""
+    role = update.message.text
+    context.user_data['role'] = role
+    
+    # Проверяем, является ли роль переводчиком
+    if role in ['Перевод япон', 'Перевод англ']:
+        context.user_data['work_samples'] = 'Не требуется (переводчик)'
+        await update.message.reply_text(
+            "Пришлите ссылку на ваш Telegram аккаунт (например: @username или t.me/username)\n\n"
+            "Если вы нам подходите, администратор свяжется с вами.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return TG_LINK
+    else:
+        await update.message.reply_text(
+            "Пришлите примеры ваших работ (фото, видео, аудио или документы).\n\n"
+            "Можно отправить несколько файлов. Когда закончите, напишите /done",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return WORK_SAMPLES
+
+async def work_samples(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет примеры работ."""
+    if 'work_samples' not in context.user_data:
+        context.user_data['work_samples'] = []
+    
+    # Сохраняем информацию о файле
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        context.user_data['work_samples'].append({'type': 'photo', 'file_id': file_id})
+        await update.message.reply_text("✅ Фото сохранено! Отправьте еще или /done")
+    elif update.message.video:
+        file_id = update.message.video.file_id
+        context.user_data['work_samples'].append({'type': 'video', 'file_id': file_id})
+        await update.message.reply_text("✅ Видео сохранено! Отправьте еще или /done")
+    elif update.message.audio:
+        file_id = update.message.audio.file_id
+        context.user_data['work_samples'].append({'type': 'audio', 'file_id': file_id})
+        await update.message.reply_text("✅ Аудио сохранено! Отправьте еще или /done")
+    elif update.message.document:
+        file_id = update.message.document.file_id
+        context.user_data['work_samples'].append({'type': 'document', 'file_id': file_id})
+        await update.message.reply_text("✅ Документ сохранен! Отправьте еще или /done")
+    elif update.message.voice:
+        file_id = update.message.voice.file_id
+        context.user_data['work_samples'].append({'type': 'voice', 'file_id': file_id})
+        await update.message.reply_text("✅ Голосовое сообщение сохранено! Отправьте еще или /done")
+    
+    return WORK_SAMPLES
+
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершает отправку работ и запрашивает ссылку на Telegram."""
+    if 'work_samples' not in context.user_data or not context.user_data['work_samples']:
+        await update.message.reply_text("Вы не отправили ни одного примера работ. Отправьте хотя бы один файл.")
+        return WORK_SAMPLES
+    
+    await update.message.reply_text(
+        "Спасибо за примеры работ! Теперь пришлите ссылку на ваш Telegram аккаунт "
+        "(например: @username или t.me/username)\n\n"
+        "Если вы нам подходите, администратор свяжется с вами.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return TG_LINK
+
+async def tg_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет ссылку на Telegram и отправляет заявку администратору."""
+    context.user_data['tg_link'] = update.message.text
+    user = update.message.from_user
+    
+    # Формируем заявку для администратора
+    application_text = (
+        "🎬 *НОВАЯ ЗАЯВКА В ANIFRAME* 🎬\n\n"
+        f"👤 *Пользователь:* {user.first_name} {user.last_name or ''} (@{user.username or 'нет'})\n"
+        f"🔞 *Возраст:* {context.user_data['age']}\n"
+        f"🎭 *Роль:* {context.user_data['role']}\n"
+        f"📎 *Количество работ:* {len(context.user_data.get('work_samples', [])) if isinstance(context.user_data.get('work_samples'), list) else 'Не предоставлены'}\n"
+        f"📞 *Telegram:* {context.user_data['tg_link']}\n"
+        f"🆔 *User ID:* {user.id}"
+    )
+    
+    # Отправляем заявку администратору
+    try:
+        # Отправляем текст заявки
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=application_text,
+            parse_mode='Markdown'
+        )
+        
+        # Отправляем примеры работ, если они есть
+        if 'work_samples' in context.user_data and isinstance(context.user_data['work_samples'], list):
+            for work in context.user_data['work_samples']:
+                try:
+                    if work['type'] == 'photo':
+                        await context.bot.send_photo(ADMIN_CHAT_ID, work['file_id'], caption="Пример работы")
+                    elif work['type'] == 'video':
+                        await context.bot.send_video(ADMIN_CHAT_ID, work['file_id'], caption="Пример работы")
+                    elif work['type'] == 'audio':
+                        await context.bot.send_audio(ADMIN_CHAT_ID, work['file_id'], caption="Пример работы")
+                    elif work['type'] == 'document':
+                        await context.bot.send_document(ADMIN_CHAT_ID, work['file_id'], caption="Пример работы")
+                    elif work['type'] == 'voice':
+                        await context.bot.send_voice(ADMIN_CHAT_ID, work['file_id'], caption="Пример работы")
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке работы: {e}")
+                    continue
+        
+        # Сообщение пользователю
+        await update.message.reply_text(
+            "✅ Ваша заявка успешно отправлена!\n\n"
+            "Спасибо за интерес к нашей студии! Если вы нам подходите, "
+            "администратор свяжется с вами в течение нескольких дней.\n\n"
+            "Желаем удачи! 🍀"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке заявки: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при отправке заявки. "
+            "Пожалуйста, попробуйте позже или свяжитесь с администратором."
+        )
+    
+    # Очищаем данные пользователя
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет разговор."""
+    await update.message.reply_text(
+        "Заявка отменена. Если передумаете - напишите /start снова!",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+def main():
+    """Запуск бота."""
+    # Проверяем наличие токена
+    if BOT_TOKEN == 'ВАШ_ТОКЕН_БОТА':
+        print("❌ Ошибка: Не установлен BOT_TOKEN!")
+        print("Установите переменную окружения:")
+        print("export BOT_TOKEN='ваш_токен'")
+        return
+    
+    if ADMIN_CHAT_ID == 'ВАШ_TELEGRAM_ID':
+        print("❌ Ошибка: Не установлен ADMIN_CHAT_ID!")
+        print("Установите переменную окружения:")
+        print("export ADMIN_CHAT_ID='ваш_id'")
+        return
+    
+    # Создаем Application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Обработчик разговора
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, age)],
+            ROLE: [MessageHandler(filters.Regex('^(Перевод япон|Перевод англ|Монтажер|Звукомонтажер|Актёр озвучки|Актриса озвучки)$'), role)],
+            WORK_SAMPLES: [
+                MessageHandler(filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.DOCUMENT | filters.VOICE, work_samples),
+                CommandHandler('done', done)
+            ],
+            TG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg_link)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    
+    application.add_handler(conv_handler)
+    
+    # Запуск бота
+    print("🤖 Бот Aniframe запускается...")
+    print(f"👮 Администратор: {ADMIN_CHAT_ID}")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
